@@ -371,7 +371,7 @@ export async function trashGoogleMail(session: GoogleSession, ids: string[], sen
       }
     }));
   } catch (error) {
-    if (!cancelled(error)) { failed.push(...unique.filter(id => !moved.includes(id))); errorMessage = error instanceof Error ? error.message : 'Gmail could not check the selection.'; }
+    if (!cancelled(error)) { const acknowledged = new Set(moved); failed.push(...unique.filter(id => !acknowledged.has(id))); errorMessage = error instanceof Error ? error.message : 'Gmail could not check the selection.'; }
   }
   // Skipped IDs remain selected so the UI cannot claim they were moved.
   const movedSet = new Set(moved);
