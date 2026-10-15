@@ -98,7 +98,11 @@ export function useGoogleConnection(initialClientId: string) {
     if (cleaned !== clientId) disconnect();
     localStorage.setItem('mailbot.googleClientId', cleaned); setClientId(cleaned); setSetupOpen(false);
   }
-  return { session, connect: () => connect(false), connectFast: () => connect(true), connectDrive: () => connect(false, true), disconnect, connecting: connecting || restoring, connectionError, storageWarning, setupOpen, setSetupOpen, clientId, saveClientId };
+  function useStandardScanning() {
+    setSession(current => current ? { ...current, fastReader: undefined } : null);
+    setConnectionError('');
+  }
+  return { session, useStandardScanning, connect: () => connect(false), connectFast: () => connect(true), connectDrive: () => connect(false, true), disconnect, connecting: connecting || restoring, connectionError, storageWarning, setupOpen, setSetupOpen, clientId, saveClientId };
 }
 
 export function GoogleSetup({ clientId, onSave, onClose }: { clientId: string; onSave: (value: string) => void; onClose: () => void }) {

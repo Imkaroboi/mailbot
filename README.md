@@ -53,6 +53,8 @@ Official requirements: [restricted scope verification](https://developers.google
 
 ## Deploy the shared fast scanner
 
+The configured scanner is `https://mailbot-scanner.onrender.com` on Render’s free plan. This public-Git deployment needs a manual Render deploy after backend code changes. The blueprint below is available for future automated deployments.
+
 GitHub Pages hosts static files and cannot open IMAP connections. Deploy `backend/scanner` as a separate Node service. The included `render.yaml` deploys a free Docker web service from this repository; free services can sleep and have a slow first connection.
 
 1. Deploy the Render blueprint, or build `backend/scanner/Dockerfile` on a host that permits outbound TLS on port 993.
