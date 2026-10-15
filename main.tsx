@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import Dashboard from './app/dashboard';
 import './app/globals.css';
 
-declare global { interface Window { MAILBOT_CONFIG?: { googleClientId?: string } } }
+import './lib/runtime-config';
 const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || window.MAILBOT_CONFIG?.googleClientId || '';
 createRoot(document.getElementById('root')!).render(<>
   <Dashboard user={null} signInPath="/" signOutPath="/" oauthClientId={clientId} />

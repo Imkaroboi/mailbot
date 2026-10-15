@@ -1,4 +1,0 @@
-import type { DirectoryProgress, GoogleSession, IndexedMessage } from './google-mail';
-export async function localReaderAvailable(){ return false; }
-export async function scanLocalSenderDirectory(_session:GoogleSession,_onList:(ids:Set<string>,estimate:number)=>void|Promise<void>,_onBatch:(messages:IndexedMessage[],progress:DirectoryProgress)=>Promise<void>,_progress?: (progress:DirectoryProgress)=>void,_signal?:AbortSignal):Promise<{ids:Set<string>;listed:number;indexed:number}>{throw new Error('The public web app uses Google APIs. The local fast scanner is available in the local edition.');}
-export async function readLocalSenderMail(_session:GoogleSession,_sender:string,_progress?:(count:number)=>void,_signal?:AbortSignal):Promise<IndexedMessage[]>{throw new Error('The public web app uses Google APIs.');}

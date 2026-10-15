@@ -1,11 +1,11 @@
 import { mailItem, mailSearches, type CleanupItem } from './mailbot';
 import { BulkUnavailableError, scanBulkSenderDirectory } from './gmail-bulk';
-import { readLocalSenderMail, scanLocalSenderDirectory } from './gmail-local-reader';
+import { fastReaderEnabled, readFastSenderMail, scanFastSenderDirectory } from './fast-reader';
 
-export type GoogleSession = { token: string; expiresAt: number; email: string; name: string; imap?: boolean; drive?: boolean };
+export type GoogleSession = { token: string; expiresAt: number; email: string; name: string; imap?: boolean; drive?: boolean; fastReader?: string };
 export type SenderMessage = { id: string; title: string; date: string | null; size: number; labels: string[]; url: string };
 export type IndexedMessage = { id: string; sender: string; name: string; title: string; date: number; size: number | null; labels: string[] };
-export type DirectoryProgress = { phase: 'listing' | 'indexing'; listed: number; indexed: number; total: number; groupedConversations?: number; mode?: 'bulk' | 'standard' | 'imap'; bulkUnavailable?: string; pages?: number; rate?: number; totalIsEstimate?: boolean };
+export type DirectoryProgress = { phase: 'connecting' | 'listing' | 'indexing'; listed: number; indexed: number; total: number; groupedConversations?: number; mode?: 'bulk' | 'standard' | 'imap'; bulkUnavailable?: string; pages?: number; rate?: number; totalIsEstimate?: boolean };
 type Message = { id: string; internalDate?: string; sizeEstimate?: number; labelIds?: string[]; payload?: { headers?: { name: string; value: string }[] } };
 export type ScanProgress = { phase: string; candidates: number; inspected: number; mailboxTotal: number };
 export type PendingMessage = { id: string; category: string };
@@ -16,11 +16,11 @@ export const trashBatchSize = 1_000;
 export const trashConcurrency = 3;
 export const detailBatchSize = 100;
 const root = 'https://gmail.googleapis.com/gmail/v1/users/me';
-// Leave headroom beneath Gmail's 6,000 units/minute/user limit. Reserving a
-// slot only serializes dispatch; independent network requests can overlap.
+// Keep a rolling per-account budget below Google's 6,000 units/minute limit.
+// Pace metadata reads, but let bulk writes use available quota immediately.
 const quotaUnitsPerMinute = 5_000;
-let reservationQueue: Promise<void> = Promise.resolve();
-let nextRequestAt = 0;
+type QuotaState = { ledger: { at: number; cost: number }[]; nextReadAt: number };
+const quotas = new Map<string, QuotaState>();
 
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new DOMException('Scan cancelled', 'AbortError'));
@@ -39,14 +39,31 @@ function quotaCost(path: string, method?: string) {
   if (/\/messages\/[^/?]+/.test(path)) return 20;
   return 5;
 }
-function reserve(cost: number, signal?: AbortSignal): Promise<void> {
-  const slot = reservationQueue.then(async () => {
+async function reserve(session: GoogleSession, cost: number, bulkWrite: boolean, signal?: AbortSignal): Promise<void> {
+  const account = session.email.trim().toLowerCase() || 'pending-profile';
+  let state = quotas.get(account);
+  if (!state) { state = { ledger: [], nextReadAt: 0 }; quotas.set(account, state); }
+  while (true) {
     if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
-    await pause(Math.max(0, nextRequestAt - Date.now()), signal);
-    nextRequestAt = Math.max(nextRequestAt, Date.now()) + cost * 60_000 / quotaUnitsPerMinute;
-  });
-  reservationQueue = slot.then(() => undefined, () => undefined);
-  return slot;
+    const now = Date.now();
+    state.ledger = state.ledger.filter(entry => entry.at > now - 60_000);
+    const used = state.ledger.reduce((sum, entry) => sum + entry.cost, 0);
+    let quotaWait = 0;
+    if (used + cost > quotaUnitsPerMinute) {
+      let released = 0;
+      for (const entry of state.ledger) {
+        released += entry.cost;
+        if (used - released + cost <= quotaUnitsPerMinute) { quotaWait = entry.at + 60_000 - now; break; }
+      }
+    }
+    const wait = Math.max(quotaWait, bulkWrite ? 0 : state.nextReadAt - now);
+    if (wait > 0) { await pause(wait, signal); continue; }
+    // No await between checking and recording: simultaneous callers cannot
+    // spend the same remaining quota. Reads recheck after every wait.
+    state.ledger.push({ at: now, cost });
+    if (!bulkWrite) state.nextReadAt = now + cost * 60_000 / quotaUnitsPerMinute;
+    return;
+  }
 }
 
 export function senderAddress(value: string): string {
@@ -61,7 +78,7 @@ export async function googleRequest<T>(session: GoogleSession, path: string, ini
   const signal = beforeSendSignal || init?.signal || undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
       if (Date.now() >= session.expiresAt) throw new Error('Your Google session expired. Connect Google again to continue.');
-      await reserve(quotaCost(path, init?.method), signal);
+      await reserve(session, quotaCost(path, init?.method), path === '/messages/batchModify', signal);
       if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
       const response = await fetch(root + path, { ...init, headers: { Authorization: `Bearer ${session.token}`, 'Content-Type': 'application/json' }, cache: 'no-store' });
       // batchModify can return an empty successful response.
@@ -116,7 +133,7 @@ export async function scanSenderDirectory(
   onProgress?: (progress: DirectoryProgress) => void,
   signal?: AbortSignal,
 ) {
-  if (false) return scanLocalSenderDirectory(session, onList, onBatch, onProgress, signal);
+  if (fastReaderEnabled(session)) return scanFastSenderDirectory(session, onList, onBatch, onProgress, signal);
   let bulkUnavailable = '';
   try { return await scanBulkSenderDirectory(session, onList, onBatch, onProgress, reserve, signal); }
   catch (error) {
@@ -227,8 +244,8 @@ export async function loadGoogleMailBatch(session: GoogleSession, pending: Pendi
 }
 export async function findSenderMail(session: GoogleSession, value: string, progress?: (count: number) => void, signal?: AbortSignal): Promise<SenderMessage[]> {
   const sender = senderAddress(value); let pageToken = ''; const ids = new Set<string>(); const seenTokens = new Set<string>();
-  if (false) {
-    const messages = await readLocalSenderMail(session, sender, progress, signal);
+  if (fastReaderEnabled(session)) {
+    const messages = await readFastSenderMail(session, sender, progress, signal);
     return messages.map(message => ({ id: message.id, title: message.title, date: message.date ? new Date(message.date).toISOString() : null, size: message.size || 0, labels: message.labels, url: `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(session.email)}#all/${message.id}` }));
   }
   do {
@@ -263,8 +280,8 @@ export async function readSenderDirectory(session: GoogleSession, value: string,
     const [ids, starred, important] = await Promise.all([list(), list('is:starred'), list('label:IMPORTANT')]);
     const known = new Map(cached.map(message => [message.id, message]));
     const missing = [...ids].filter(id => !known.has(id));
-    if (missing.length > 20 && false) {
-      const fresh = await readLocalSenderMail(session, sender, progress, signal);
+    if (missing.length > 20 && fastReaderEnabled(session)) {
+      const fresh = await readFastSenderMail(session, sender, progress, signal);
       for (const message of fresh) if (ids.has(message.id)) known.set(message.id, message);
     } else {
       await pool(missing, async id => {
@@ -282,7 +299,7 @@ export async function readSenderDirectory(session: GoogleSession, value: string,
       return [{ ...message, labels }];
     });
   }
-  if (false) return readLocalSenderMail(session, sender, progress, signal);
+  if (fastReaderEnabled(session)) return readFastSenderMail(session, sender, progress, signal);
   const messages = await findSenderMail(session, sender, progress, signal);
   return messages.filter(message => !message.labels.some(label => ['SENT', 'DRAFT', 'TRASH'].includes(label))).map(message => ({ id: message.id, sender, name: sender, title: message.title, date: message.date ? Number(new Date(message.date)) : 0, size: message.size, labels: message.labels }));
 }

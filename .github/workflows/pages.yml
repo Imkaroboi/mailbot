@@ -22,6 +22,7 @@ jobs:
       - uses: actions/configure-pages@v5
         id: pages
       - run: pnpm install --frozen-lockfile
+      - run: pnpm test
       - run: pnpm build
         env:
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}/

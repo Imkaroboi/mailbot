@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: mailbot-scanner
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./backend/scanner/Dockerfile
+    dockerContext: ./backend/scanner
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://imkaroboi.github.io
+      - key: GOOGLE_CLIENT_IDS
+        value: 675829807386-2gui4pkf1465kn7t0ao94nhcjgogrtg5.apps.googleusercontent.com

@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, X } from 'lucide-react';
 import { googleRequest, type GoogleSession } from '@/lib/google-mail';
+import { fastReaderUrl } from '@/lib/runtime-config';
+import { fastReaderEnabled } from '@/lib/fast-reader';
 import { browserSessionStorage, clearGoogleSession, restoreGoogleSession, saveGoogleSession } from '@/lib/google-session';
 
 type TokenResponse = { access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string };
@@ -57,6 +59,8 @@ export function useGoogleConnection(initialClientId: string) {
   }, [session]);
   function connect(fast = false, drive = false) {
     setConnectionError('');
+    const reader = fast ? fastReaderUrl() : fastReaderEnabled(session) ? session!.fastReader : '';
+    if (fast && !reader) { setConnectionError('Fast scanning has not been configured for this website yet.'); return; }
     if (!clientId) { setSetupOpen(true); return; }
     if (!ready || !window.google) { setConnectionError('Google sign-in is still loading. Try again in a moment.'); return; }
     restoreController.current?.abort(); restoreController.current = null;
@@ -65,13 +69,13 @@ export function useGoogleConnection(initialClientId: string) {
     setConnecting(true);
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
-      scope: ['https://www.googleapis.com/auth/gmail.modify', ...(drive || session?.drive ? ['https://www.googleapis.com/auth/drive'] : [])].join(' '),
+      scope: [reader ? 'https://mail.google.com/' : 'https://www.googleapis.com/auth/gmail.modify', ...(drive || session?.drive ? ['https://www.googleapis.com/auth/drive'] : [])].join(' '),
       error_callback: () => { if (attempt.current === currentAttempt) { setConnecting(false); setConnectionError('Google sign-in was closed or blocked. Allow the popup and try again.'); } },
       callback: async response => {
         if (attempt.current !== currentAttempt) return;
         if (!response.access_token || response.error) { setConnecting(false); setConnectionError(response.error_description || 'Google did not grant Gmail access.'); return; }
         const scopes = new Set(response.scope?.split(' '));
-        const next: GoogleSession = { token: response.access_token, expiresAt: Date.now() + Number(response.expires_in || 3600) * 1000 - 30000, email: '', name: '', imap: false, drive: scopes.has('https://www.googleapis.com/auth/drive') };
+        const next: GoogleSession = { token: response.access_token, expiresAt: Date.now() + Number(response.expires_in || 3600) * 1000 - 30000, email: '', name: '', imap: scopes.has('https://mail.google.com/'), ...(reader && scopes.has('https://mail.google.com/') ? { fastReader: reader } : {}), drive: scopes.has('https://www.googleapis.com/auth/drive') };
         try {
           const profile = await googleRequest<{ emailAddress: string }>(next, '/profile');
           if (attempt.current !== currentAttempt) return;
@@ -99,5 +103,5 @@ export function useGoogleConnection(initialClientId: string) {
 
 export function GoogleSetup({ clientId, onSave, onClose }: { clientId: string; onSave: (value: string) => void; onClose: () => void }) {
   const [value, setValue] = useState(clientId); const [error, setError] = useState('');
-  return <div className="modal-backdrop"><div className="review-modal" role="dialog" aria-modal="true" aria-labelledby="google-setup-title"><button className="modal-close" onClick={onClose} aria-label="Close Google setup"><X size={19} /></button><div className="modal-kicker">GOOGLE CONNECTION</div><h2 id="google-setup-title">Connect your own Google account</h2><p>Google requires a web OAuth client ID for this app. This public ID is saved on this browser. Your connection is saved in this tab until Google access expires, so reloading keeps you connected. Disconnect clears it. Gmail and Drive requests go directly from this browser to Google.</p><ol className="setup-steps"><li>Enable the Gmail API, and the Drive API if you use Drive.</li><li>Create an OAuth client with application type <strong>Web application</strong>.</li><li>Add <code>{typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5173'}</code> to Authorized JavaScript origins.</li><li>If your OAuth app is in testing, add your Google email as a test user.</li></ol><a className="setup-link" href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noreferrer">Open Google Auth Platform <ArrowRight size={14} /></a><form onSubmit={e => { e.preventDefault(); try { onSave(value); } catch(error) { setError(error instanceof Error ? error.message : 'Invalid client ID'); } }}><label className="setup-label" htmlFor="google-client-id">Public Google OAuth client ID</label><input id="google-client-id" className="setup-input" value={value} onChange={e => setValue(e.target.value)} placeholder="123456789-example.apps.googleusercontent.com" required />{error && <p className="setup-error">{error}</p>}<div className="modal-buttons"><button type="button" className="cancel-btn" onClick={onClose}>Cancel</button><button type="submit" className="confirm-btn">Save connection <ArrowRight size={16} /></button></div></form></div></div>;
+  return <div className="modal-backdrop"><div className="review-modal" role="dialog" aria-modal="true" aria-labelledby="google-setup-title"><button className="modal-close" onClick={onClose} aria-label="Close Google setup"><X size={19} /></button><div className="modal-kicker">GOOGLE CONNECTION</div><h2 id="google-setup-title">Connect your own Google account</h2><p>Google requires a web OAuth client ID for this app. This public ID is saved on this browser. Your connection is saved in this tab until Google access expires, so reloading keeps you connected. Disconnect clears it. Standard Gmail cleanup and Drive requests go directly to Google. Optional fast scanning sends a temporary token to the configured secure scanner, which reads headers without storing your token or emails.</p><ol className="setup-steps"><li>Enable the Gmail API, and the Drive API if you use Drive.</li><li>Create an OAuth client with application type <strong>Web application</strong>.</li><li>Add <code>{typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5173'}</code> to Authorized JavaScript origins.</li><li>If your OAuth app is in testing, add your Google email as a test user.</li></ol><a className="setup-link" href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noreferrer">Open Google Auth Platform <ArrowRight size={14} /></a><form onSubmit={e => { e.preventDefault(); try { onSave(value); } catch(error) { setError(error instanceof Error ? error.message : 'Invalid client ID'); } }}><label className="setup-label" htmlFor="google-client-id">Public Google OAuth client ID</label><input id="google-client-id" className="setup-input" value={value} onChange={e => setValue(e.target.value)} placeholder="123456789-example.apps.googleusercontent.com" required />{error && <p className="setup-error">{error}</p>}<div className="modal-buttons"><button type="button" className="cancel-btn" onClick={onClose}>Cancel</button><button type="submit" className="confirm-btn">Save connection <ArrowRight size={16} /></button></div></form></div></div>;
 }

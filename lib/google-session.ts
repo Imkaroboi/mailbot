@@ -31,7 +31,8 @@ export function readGoogleSession(clientId: string, storage: SessionStorage | nu
     }
     if (session.expiresAt <= now) { clearGoogleSession(storage); return { status: 'expired', session: null }; }
     if (session.drive !== undefined && typeof session.drive !== 'boolean') { clearGoogleSession(storage); return { status: 'invalid', session: null }; }
-    return { status: 'saved', session: { token: session.token, email: session.email, name: session.name, expiresAt: session.expiresAt, imap: session.imap || false, ...(session.drive !== undefined ? { drive: session.drive } : {}) } };
+    if (session.fastReader !== undefined && (typeof session.fastReader !== 'string' || session.fastReader.length > 2048 || !session.fastReader.startsWith('https://') || new URL(session.fastReader).origin !== session.fastReader)) { clearGoogleSession(storage); return { status: 'invalid', session: null }; }
+    return { status: 'saved', session: { token: session.token, email: session.email, name: session.name, expiresAt: session.expiresAt, imap: session.imap || false, ...(session.drive !== undefined ? { drive: session.drive } : {}), ...(session.fastReader ? { fastReader: session.fastReader } : {}) } };
   } catch { clearGoogleSession(storage); return { status: 'invalid', session: null }; }
 }
 
