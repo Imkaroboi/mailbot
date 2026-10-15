@@ -1,14 +1,13 @@
 import { mailItem, mailSearches, type CleanupItem } from './mailbot';
-import { BulkUnavailableError, scanBulkSenderDirectory } from './gmail-bulk';
 import { fastReaderEnabled, readFastSenderMail, scanFastSenderDirectory } from './fast-reader';
 
 export type GoogleSession = { token: string; expiresAt: number; email: string; name: string; imap?: boolean; drive?: boolean; fastReader?: string };
 export type SenderMessage = { id: string; title: string; date: string | null; size: number; labels: string[]; url: string };
 export type IndexedMessage = { id: string; sender: string; name: string; title: string; date: number; size: number | null; labels: string[] };
-export type DirectoryProgress = { phase: 'connecting' | 'listing' | 'indexing'; listed: number; indexed: number; total: number; groupedConversations?: number; mode?: 'bulk' | 'standard' | 'imap'; bulkUnavailable?: string; pages?: number; rate?: number; totalIsEstimate?: boolean };
+export type DirectoryProgress = { phase: 'connecting' | 'listing' | 'indexing'; listed: number; indexed: number; total: number; mode?: 'imap'; rate?: number };
 type Message = { id: string; internalDate?: string; sizeEstimate?: number; labelIds?: string[]; payload?: { headers?: { name: string; value: string }[] } };
 export type ScanProgress = { phase: string; candidates: number; inspected: number; mailboxTotal: number };
-export type PendingMessage = { id: string; category: string };
+export type PendingMessage = { id: string; category: string; message: IndexedMessage };
 export type UndoMessage = { id: string; inInbox: boolean };
 export type CleanupProgress = { phase: 'checking' | 'moving' | 'waiting'; total: number; batchSize: number; movedIds?: string[]; undoMessages?: UndoMessage[]; rate: number; seconds: number; waitSeconds?: number };
 export type TrashOutcome = { moved: string[]; failed: string[]; remaining: string[]; cancelled: boolean; undo: UndoMessage[]; error?: string; seconds: number };
@@ -111,20 +110,7 @@ async function pool<T, R>(values: T[], task: (value: T) => Promise<R>, concurren
 function metadata(session: GoogleSession, id: string, signal?: AbortSignal) {
   return googleRequest<Message>(session, `/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&fields=id%2ClabelIds%2CinternalDate%2CsizeEstimate%2Cpayload%2Fheaders`, { signal });
 }
-function threadMetadata(session: GoogleSession, id: string, signal?: AbortSignal) {
-  return googleRequest<{ messages?: Message[] }>(session, `/threads/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&fields=${encodeURIComponent('messages(id,labelIds,internalDate,sizeEstimate,payload/headers)')}`, { signal });
-}
 function header(message: Message, name: string) { return message.payload?.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || ''; }
-function senderName(value: string, address: string) {
-  const name = value.replace(/<[^<>]+>/g, '').replace(/^"|"$/g, '').trim();
-  return name && name.toLowerCase() !== address ? name : address;
-}
-function indexedMessage(message: Message): IndexedMessage | null {
-  const rawFrom = header(message, 'From');
-  const sender = fromAddress(rawFrom);
-  if (!sender || !sender.includes('@') || message.labelIds?.some(label => ['SENT', 'DRAFT', 'TRASH'].includes(label))) return null;
-  return { id: message.id, sender, name: senderName(rawFrom, sender), title: header(message, 'Subject') || '(No subject)', date: Number(message.internalDate) || 0, size: message.sizeEstimate || 0, labels: message.labelIds || [] };
-}
 export async function scanSenderDirectory(
   session: GoogleSession,
   knownIds: Set<string>,
@@ -133,134 +119,74 @@ export async function scanSenderDirectory(
   onProgress?: (progress: DirectoryProgress) => void,
   signal?: AbortSignal,
 ) {
-  if (fastReaderEnabled(session)) return scanFastSenderDirectory(session, onList, onBatch, onProgress, signal);
-  let bulkUnavailable = '';
-  try { return await scanBulkSenderDirectory(session, onList, onBatch, onProgress, reserve, signal); }
-  catch (error) {
-    if (!(error instanceof BulkUnavailableError)) throw error;
-    bulkUnavailable = error.message;
-  }
-  const reportProgress = (value: DirectoryProgress) => onProgress?.({ ...value, mode: 'standard', bulkUnavailable });
-  const ids = new Set<string>(); const threadIds = new Map<string, string>(); const seenTokens = new Set<string>();
-  let pageToken = ''; let estimate = 0;
-  do {
-    const page = await googleRequest<{ messages?: { id: string; threadId?: string }[]; nextPageToken?: string; resultSizeEstimate?: number }>(session, `/messages?maxResults=500&includeSpamTrash=true&q=${encodeURIComponent('-in:sent -in:drafts -in:trash')}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`, { signal });
-    for (const message of page.messages || []) { ids.add(message.id); if (message.threadId) threadIds.set(message.id, message.threadId); }
-    estimate = Math.max(estimate, page.resultSizeEstimate || 0, ids.size);
-    reportProgress({ phase: 'listing', listed: ids.size, indexed: knownIds.size, total: estimate });
-    pageToken = page.nextPageToken || '';
-    if (pageToken && seenTokens.has(pageToken)) throw new Error('Google repeated a mailbox page. Try refreshing the directory.');
-    seenTokens.add(pageToken);
-  } while (pageToken);
-  if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
-  await onList(ids, ids.size);
-  if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
-  const missing = [...ids].filter(id => !knownIds.has(id));
-  type DetailTask = { kind: 'message' | 'thread'; id: string; ids: string[]; order: number };
-  const tasks: DetailTask[] = []; const byThread = new Map<string, DetailTask>();
-  const orderById = new Map(missing.map((id, order) => [id, order]));
-  missing.forEach((id, order) => {
-    const threadId = threadIds.get(id);
-    if (!threadId) { tasks.push({ kind: 'message', id, ids: [id], order }); return; }
-    const task = byThread.get(threadId);
-    if (task) task.ids.push(id);
-    else byThread.set(threadId, { kind: 'thread', id: threadId, ids: [id], order });
-  });
-  for (const task of byThread.values()) {
-    if (task.ids.length < 3) for (const id of task.ids) tasks.push({ kind: 'message', id, ids: [id], order: orderById.get(id) || 0 });
-    else tasks.push(task);
-  }
-  tasks.sort((a, b) => a.order - b.order);
-  const groupedConversations = tasks.filter(task => task.kind === 'thread').length;
-  let next = 0; let inspected = ids.size - missing.length; let fatal: unknown = null;
-  const buffered: IndexedMessage[] = [];
-  const started = Date.now(); const initial = inspected;
-  const report = (): DirectoryProgress => ({ phase: 'indexing', listed: ids.size, indexed: inspected, total: ids.size, groupedConversations, mode: 'standard', bulkUnavailable, rate: (inspected - initial) / Math.max(1, (Date.now() - started) / 1000) });
-  reportProgress(report());
-  await Promise.all(Array.from({ length: Math.min(6, tasks.length) }, async () => {
-    while (next < tasks.length && !fatal && !signal?.aborted) {
-      const task = tasks[next++];
-      try {
-        const messages = task.kind === 'thread' ? (await threadMetadata(session, task.id, signal)).messages || [] : [await metadata(session, task.id, signal)];
-        const wanted = new Set(task.ids);
-        for (const message of messages) {
-          if (!wanted.has(message.id)) continue;
-          const indexed = indexedMessage(message);
-          if (indexed) buffered.push(indexed);
-        }
-        inspected += task.ids.length;
-        if (buffered.length >= 25) await onBatch(buffered.splice(0), report());
-        if (inspected % 25 === 0 || inspected === ids.size) reportProgress(report());
-      } catch (error) {
-        if ((error as { status?: number }).status === 404) { inspected += task.ids.length; continue; }
-        if (!signal?.aborted) fatal = error;
-      }
-    }
-  }));
-  if (buffered.length) await onBatch(buffered.splice(0), report());
-  if (fatal) throw fatal;
-  if (signal?.aborted) throw new DOMException('Operation cancelled', 'AbortError');
-  reportProgress(report());
-  return { ids, listed: ids.size, indexed: inspected };
+  return scanFastSenderDirectory(session, onList, onBatch, onProgress, signal);
 }
+
 export async function scanGoogleMail(session: GoogleSession, progress?: (value: ScanProgress) => void, signal?: AbortSignal) {
-  const profile = await googleRequest<{ messagesTotal?: number }>(session, '/profile', { signal });
-  const mailboxTotal = profile.messagesTotal || 0;
+  if (!fastReaderEnabled(session)) throw new Error('Reconnect Google to enable fast scanning.');
+  const controller = new AbortController();
+  const scanSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   const candidates = new Map<string, string>();
-  const report = (phase: string, inspected: number) => progress?.({ phase, candidates: candidates.size, inspected, mailboxTotal });
-  for (const search of mailSearches) {
-    let pageToken = ''; const seenTokens = new Set<string>();
-    do {
-      const page = await googleRequest<{ messages?: { id: string }[]; nextPageToken?: string }>(session, `/messages?maxResults=500&includeSpamTrash=true&q=${encodeURIComponent(search.query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`, { signal });
-      for (const message of page.messages || []) if (!candidates.has(message.id)) candidates.set(message.id, search.category);
-      report(`Searching ${search.category}`, 0);
-      pageToken = page.nextPageToken || '';
-      if (pageToken && seenTokens.has(pageToken)) throw new Error('Google repeated a result page. Please scan again.');
-      seenTokens.add(pageToken);
-    } while (pageToken);
-  }
-  const buckets = mailSearches.map(search => [...candidates].filter(([, category]) => category === search.category).map(([id, category]) => ({ id, category })));
+  const headers = new Map<string, IndexedMessage>();
+  let mailboxTotal = 0; let inspected = 0;
+  const report = (phase: string) => progress?.({ phase, candidates: candidates.size, inspected, mailboxTotal });
+  // ID-only searches preserve Gmail's exact cleanup rules (including body-based
+  // newsletter matching). All message details arrive through one bulk stream.
+  try { await Promise.all([
+    (async () => {
+      const profile = await googleRequest<{ messagesTotal?: number }>(session, '/profile', { signal: scanSignal });
+      mailboxTotal = profile.messagesTotal || 0;
+      for (const search of mailSearches) {
+        let pageToken = ''; const seenTokens = new Set<string>();
+        do {
+          const page = await googleRequest<{ messages?: { id: string }[]; nextPageToken?: string }>(session, `/messages?maxResults=500&includeSpamTrash=true&q=${encodeURIComponent(search.query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`, { signal: scanSignal });
+          for (const message of page.messages || []) if (!candidates.has(message.id)) candidates.set(message.id, search.category);
+          report(`Searching ${search.category}`);
+          pageToken = page.nextPageToken || '';
+          if (pageToken && seenTokens.has(pageToken)) throw new Error('Google repeated a result page. Please scan again.');
+          seenTokens.add(pageToken);
+        } while (pageToken);
+      }
+    })(),
+    scanFastSenderDirectory(session, () => {}, async batch => {
+      for (const message of batch) headers.set(message.id, message);
+    }, state => { inspected = state.indexed; report(state.phase === 'connecting' ? 'Connecting to fast scanner' : 'Fast scanning'); }, scanSignal),
+  ]); } finally { controller.abort(); }
+  const buckets = mailSearches.map(search => [...candidates].flatMap(([id, category]) => {
+    const message = headers.get(id);
+    return category === search.category && message ? [{ id, category, message }] : [];
+  }));
   const pending: PendingMessage[] = [];
-  for (let index = 0; pending.length < candidates.size; index++) for (const bucket of buckets) if (bucket[index]) pending.push(bucket[index]);
+  const count = buckets.reduce((sum, bucket) => sum + bucket.length, 0);
+  for (let index = 0; pending.length < count; index++) for (const bucket of buckets) if (bucket[index]) pending.push(bucket[index]);
   const batch = await loadGoogleMailBatch(session, pending, mailboxTotal, progress, signal);
   return { items: batch.items, errors: [], scanned: { gmail: mailboxTotal, drive: 0 }, candidateTotal: pending.length, pending: batch.pending, loaded: batch.loaded, coverage: googleCoverage(batch.loaded, pending.length) };
 }
 
 export function googleCoverage(loaded: number, candidateTotal: number) {
-  return `Searched the full mailbox across five cleanup rules. Loaded ${loaded.toLocaleString()} of ${candidateTotal.toLocaleString()} matching messages for review.`;
+  return `Searched five cleanup rules and bulk-scanned received mail. Prepared ${loaded.toLocaleString()} of ${candidateTotal.toLocaleString()} matching messages for review.`;
 }
 
-export async function loadGoogleMailBatch(session: GoogleSession, pending: PendingMessage[], mailboxTotal: number, progress?: (value: ScanProgress) => void, signal?: AbortSignal) {
+export async function loadGoogleMailBatch(_session: GoogleSession, pending: PendingMessage[], mailboxTotal: number, progress?: (value: ScanProgress) => void, signal?: AbortSignal) {
   const items: CleanupItem[] = []; const batch = pending.slice(0, detailBatchSize);
   let inspected = 0;
-  for (const { id, category } of batch) {
-    const message = await metadata(session, id, signal);
-    const item = mailItem({ id: message.id, subject: header(message, 'Subject'), from_: header(message, 'From'), labels: message.labelIds, email_ts: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : undefined, display_url: `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(session.email)}#all/${message.id}` }, category);
-    if (item) items.push({ ...item, size: message.sizeEstimate ?? null });
+  for (const { id, category, message } of batch) {
+    if (signal?.aborted) throw new DOMException('Scan cancelled', 'AbortError');
+    if (!message || message.id !== id) throw new Error('Scanned headers are missing. Run the fast scan again.');
+    const item = mailItem({ id, subject: message.title, from_: `${message.name} <${message.sender}>`, labels: message.labels, email_ts: message.date ? new Date(message.date).toISOString() : undefined, display_url: `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(_session.email)}#all/${id}` }, category);
+    if (item) items.push({ ...item, size: message.size });
     inspected++;
-    if (inspected % 10 === 0 || inspected === batch.length) progress?.({ phase: 'Loading suggestions', candidates: batch.length, inspected, mailboxTotal });
+    if (inspected % 10 === 0 || inspected === batch.length) progress?.({ phase: 'Preparing scanned suggestions', candidates: batch.length, inspected, mailboxTotal });
   }
   return { items, pending: pending.slice(batch.length), loaded: batch.length };
 }
 export async function findSenderMail(session: GoogleSession, value: string, progress?: (count: number) => void, signal?: AbortSignal): Promise<SenderMessage[]> {
-  const sender = senderAddress(value); let pageToken = ''; const ids = new Set<string>(); const seenTokens = new Set<string>();
-  if (fastReaderEnabled(session)) {
-    const messages = await readFastSenderMail(session, sender, progress, signal);
-    return messages.map(message => ({ id: message.id, title: message.title, date: message.date ? new Date(message.date).toISOString() : null, size: message.size || 0, labels: message.labels, url: `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(session.email)}#all/${message.id}` }));
-  }
-  do {
-    const page = await googleRequest<{ messages?: { id: string }[]; nextPageToken?: string }>(session, `/messages?maxResults=500&includeSpamTrash=true&q=${encodeURIComponent(`from:${sender} -in:trash -in:drafts`)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`, { signal });
-    for (const message of page.messages || []) ids.add(message.id);
-    progress?.(ids.size); pageToken = page.nextPageToken || '';
-    if (pageToken && seenTokens.has(pageToken)) throw new Error('Google repeated a result page. No messages were changed. Please search again.');
-    seenTokens.add(pageToken);
-  } while (pageToken);
-  let inspected = 0;
-  const messages = await pool([...ids], async id => { const message = await metadata(session, id, signal); progress?.(++inspected); return message; }, 6, signal);
-  return messages.filter(message => fromAddress(header(message, 'From')) === sender && !message.labelIds?.includes('TRASH') && !message.labelIds?.includes('DRAFT')).map(message => ({ id: message.id, title: header(message, 'Subject') || '(No subject)', date: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : null, size: message.sizeEstimate || 0, labels: message.labelIds || [], url: `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(session.email)}#all/${message.id}` }));
+  const messages = await readFastSenderMail(session, senderAddress(value), progress, signal);
+  return messages.map(message => ({ id: message.id, title: message.title, date: message.date ? new Date(message.date).toISOString() : null, size: message.size || 0, labels: message.labels, url: `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(session.email)}#all/${message.id}` }));
 }
 export async function readSenderDirectory(session: GoogleSession, value: string, progress?: (count: number) => void, signal?: AbortSignal, cached?: readonly IndexedMessage[]): Promise<IndexedMessage[]> {
   const sender = senderAddress(value);
+  if (!fastReaderEnabled(session)) throw new Error('Reconnect Google to enable fast scanning.');
   if (cached) {
     const baseQuery = `from:(${sender}) -in:sent -in:drafts -in:trash`;
     const list = async (extra = '') => {
@@ -280,15 +206,9 @@ export async function readSenderDirectory(session: GoogleSession, value: string,
     const [ids, starred, important] = await Promise.all([list(), list('is:starred'), list('label:IMPORTANT')]);
     const known = new Map(cached.map(message => [message.id, message]));
     const missing = [...ids].filter(id => !known.has(id));
-    if (missing.length > 20 && fastReaderEnabled(session)) {
+    if (missing.length) {
       const fresh = await readFastSenderMail(session, sender, progress, signal);
       for (const message of fresh) if (ids.has(message.id)) known.set(message.id, message);
-    } else {
-      await pool(missing, async id => {
-        const message = await metadata(session, id, signal);
-        const indexed = indexedMessage(message);
-        if (indexed) known.set(id, indexed);
-      }, 6, signal);
     }
     return [...ids].flatMap(id => {
       const message = known.get(id);
@@ -299,10 +219,9 @@ export async function readSenderDirectory(session: GoogleSession, value: string,
       return [{ ...message, labels }];
     });
   }
-  if (fastReaderEnabled(session)) return readFastSenderMail(session, sender, progress, signal);
-  const messages = await findSenderMail(session, sender, progress, signal);
-  return messages.filter(message => !message.labels.some(label => ['SENT', 'DRAFT', 'TRASH'].includes(label))).map(message => ({ id: message.id, sender, name: sender, title: message.title, date: message.date ? Number(new Date(message.date)) : 0, size: message.size, labels: message.labels }));
+  return readFastSenderMail(session, sender, progress, signal);
 }
+
 export async function trashGoogleMail(session: GoogleSession, ids: string[], sender?: string, progress?: (count: number, state?: CleanupProgress) => void, signal?: AbortSignal, reviewedMessages?: readonly Pick<IndexedMessage, 'id' | 'sender'>[]): Promise<TrashOutcome> {
   const moved: string[] = []; const failed: string[] = [];
   const undo: UndoMessage[] = [];

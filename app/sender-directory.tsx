@@ -4,8 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowDownUp, ArrowRight, Check, Mail, RefreshCw, Search, Trash2, UsersRound, X } from 'lucide-react';
 import { readSenderDirectory, scanSenderDirectory, trashGoogleMail, type CleanupProgress, type DirectoryProgress, type GoogleSession, type IndexedMessage, type UndoMessage } from '@/lib/google-mail';
 import { clearSenderCache, readSenderCache, removeSenderCache, saveSenderCache } from '@/lib/sender-cache';
-import { fastReaderAvailable, fastReaderEnabled } from '@/lib/fast-reader';
-import { fastReaderUrl } from '@/lib/runtime-config';
+import { fastReaderEnabled } from '@/lib/fast-reader';
 
 type SenderGroup = { sender: string; name: string; count: number; latest: number; size: number; unknownSizes: number };
 type SenderSort = 'count' | 'recent' | 'name' | 'size';
@@ -13,11 +12,9 @@ type MessageSort = 'newest' | 'oldest' | 'largest' | 'subject';
 const dateLabel = (date: number) => date ? new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown date';
 const sizeLabel = (size: number | null) => size === null ? 'Size unavailable' : size >= 1e9 ? `${(size / 1e9).toFixed(1)} GB` : size >= 1e6 ? `${(size / 1e6).toFixed(1)} MB` : `${Math.round(size / 1e3)} KB`;
 
-export default function SenderDirectory({ session, onConnect, onConnectFast, onUseStandard, connecting, onMoved, onBusy, onScanning, onDeleting, onUndoGroup, externalBusy, externalMovedIds, externalRestoredMessages, undoPanel, active = true }: {
+export default function SenderDirectory({ session, onConnect, connecting, onMoved, onBusy, onScanning, onDeleting, onUndoGroup, externalBusy, externalMovedIds, externalRestoredMessages, undoPanel, active = true }: {
   session: GoogleSession | null;
   onConnect: () => void;
-  onConnectFast: () => void;
-  onUseStandard: () => void;
   connecting: boolean;
   onMoved: (ids: string[]) => void;
   onBusy: (busy: boolean) => void;
@@ -64,10 +61,8 @@ export default function SenderDirectory({ session, onConnect, onConnectFast, onU
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [storageWarning, setStorageWarning] = useState(false);
-  const [helperAvailable, setHelperAvailable] = useState(false);
   const [needsRestoreRefresh, setNeedsRestoreRefresh] = useState(false);
 
-  useEffect(() => { let live = true; void fastReaderAvailable().then(value => { if (live) setHelperAvailable(value); }); return () => { live = false; }; }, []);
 
   useEffect(() => { onBusy(scanning || deleting || preparingSender); onScanning(scanning); onDeleting(deleting || preparingSender); }, [scanning, deleting, preparingSender, onBusy, onScanning, onDeleting]);
 
@@ -128,7 +123,7 @@ export default function SenderDirectory({ session, onConnect, onConnectFast, onU
   }, [needsRestoreRefresh, session, hydrated, externalBusy, scanning, deleting, preparingSender]);
 
   useEffect(() => {
-    if (!active || !session || !hydrated || externalBusy || scanController.current || deleteController.current || prepareController.current || autoStarted.current === `${session.token}:${fastReaderEnabled(session)}`) return;
+    if (!active || !session || !fastReaderEnabled(session) || !hydrated || externalBusy || scanController.current || deleteController.current || prepareController.current || autoStarted.current === `${session.token}:${fastReaderEnabled(session)}`) return;
     autoStarted.current = `${session.token}:${fastReaderEnabled(session)}`;
     void refresh();
   }, [session?.token, session?.fastReader, hydrated, externalBusy, active, scanning, deleting]);
@@ -288,14 +283,11 @@ export default function SenderDirectory({ session, onConnect, onConnectFast, onU
   return <section className="directory-page">
     <div className="directory-top"><div><div className="eyebrow"><span className="eyebrow-dot" /> YOUR MAILBOX, BY SENDER</div><h1>Every sender, in one place<span className="period">.</span></h1><p className="intro">Sort who writes to you, review their emails, and move only the messages you choose to Trash.</p></div>{session && <button className="refresh-btn directory-refresh" onClick={() => scanning ? scanController.current?.abort() : void refresh()} disabled={!hydrated || deleting || preparingSender || externalBusy}><RefreshCw size={16} className={scanning ? 'spin' : ''} />{scanning ? 'Pause indexing' : complete ? 'Refresh senders' : 'Resume indexing'}</button>}</div>
     {undoPanel}
-      {helperAvailable && !fastReaderEnabled(session) && <div className="directory-fast-connect"><div><strong>Scan hundreds of headers per request</strong><p>Fast scanning uses a secure connection to {new URL(fastReaderUrl()).hostname}. Google requires full mail permission, which also allows sending and permanently deleting mail. Mailbot reads only headers; the scanner does not save your token or emails. Cleanup still moves reviewed emails to Trash.</p></div><button className="cleanup-btn" disabled={deleting || preparingSender || connecting} onClick={() => { scanController.current?.abort(); onConnectFast(); }}>{connecting ? 'Connecting…' : 'Connect fast scanning'} <ArrowRight size={15} /></button></div>}
-    {session && fastReaderEnabled(session) && <p className="directory-help">Fast scanning is connected. <button disabled={deleting || preparingSender || connecting} onClick={() => { scanController.current?.abort(); onUseStandard(); }}>Use standard scanning</button></p>}
     {!session ? <div className="directory-empty"><UsersRound size={28} /><h2>Connect Gmail to see your senders</h2><p>Mailbot will organize received messages by their From address.</p><button className="cleanup-btn" disabled={connecting} onClick={onConnect}>{connecting ? 'Connecting…' : 'Connect Google'} <ArrowRight size={15} /></button></div> : <>
-      <div className="directory-status"><div><strong>{groups.length.toLocaleString()} senders</strong><span>{allMessages.length.toLocaleString()} messages indexed{complete ? ' · Mailbox indexed' : ' · Results may change as indexing continues'}</span></div>{progress && <small>{progress.phase === 'connecting' ? 'Connecting to fast scanner…' : progress.phase === 'listing' ? `Listing mailbox: ${progress.listed.toLocaleString()} found` : `${progress.mode === 'imap' ? 'Fast scan' : progress.mode === 'bulk' ? 'Fast bulk scan' : 'Standard scan'}: ${progress.indexed.toLocaleString()}${progress.totalIsEstimate ? ' messages found' : ` of ${progress.total.toLocaleString()} messages`}${progress.rate ? ` · ${progress.rate.toFixed(1)} emails/sec` : ''}${progress.mode === 'standard' && progress.rate && progress.indexed < progress.total ? ` · about ${Math.ceil((progress.total - progress.indexed) / progress.rate / 60)} minutes left` : ''}`}</small>}</div>
-      {progress?.phase === 'indexing' && progress.total > 0 && <div className={`directory-progress ${progress.totalIsEstimate ? 'directory-progress-indeterminate' : ''}`} role="progressbar" aria-label="Sender indexing progress" aria-valuenow={progress.totalIsEstimate ? undefined : progress.indexed} aria-valuemin={0} aria-valuemax={progress.totalIsEstimate ? undefined : progress.total}><span style={{ width: progress.totalIsEstimate ? '30%' : `${Math.min(100, progress.indexed / progress.total * 100)}%` }} /></div>}
+      <div className="directory-status"><div><strong>{groups.length.toLocaleString()} senders</strong><span>{allMessages.length.toLocaleString()} messages indexed{complete ? ' · Mailbox indexed' : ' · Results may change as indexing continues'}</span></div>{progress && <small>{progress.phase === 'connecting' ? 'Connecting to fast scanner… Free hosting may take about a minute to wake up.' : `Fast scan: ${progress.indexed.toLocaleString()} of ${progress.total.toLocaleString()} messages${progress.rate ? ` · ${progress.rate.toFixed(1)} emails/sec` : ''}`}</small>}</div>
+      {progress?.phase === 'indexing' && progress.total > 0 && <div className={`directory-progress`} role="progressbar" aria-label="Sender indexing progress" aria-valuenow={progress.indexed} aria-valuemin={0} aria-valuemax={progress.total}><span style={{ width: `${Math.min(100, progress.indexed / progress.total * 100)}%` }} /></div>}
       <p className="directory-help">Scanning continues when you switch Mailbot tabs. Keep this browser tab open; completed messages are saved here and reused when you resume. You can select and move emails to Trash while scanning continues. <button onClick={() => void clearSavedIndex()} disabled={scanning || deleting || preparingSender || !allMessages.length}>Clear saved index</button>{externalBusy && !scanning ? ' Waiting for the current mailbox scan to finish.' : ''}</p>
 
-      {progress?.bulkUnavailable && !fastReaderEnabled(session) && !helperAvailable && <div className="directory-warning"><strong>Standard Gmail scan.</strong> Google limits metadata requests. Completed headers are saved in this browser, so scans reuse the existing index.</div>}
       {storageWarning && <p className="directory-warning">Browser storage is unavailable. This directory will remain available until you close this tab.</p>}
       {error && <p className="sender-error" role="alert">{error}</p>}{notice && <p className="sender-result" role="status">{notice}</p>}
       <div className="directory-grid"><div className="directory-panel"><div className="directory-panel-head"><h2>Senders</h2><span>{visibleGroups.length.toLocaleString()}</span></div><div className="directory-controls"><label className="directory-search"><Search size={15} /><input value={query} onChange={event => { setQuery(event.target.value); setSenderLimit(100); }} placeholder="Search name or email" aria-label="Search senders" /></label><label className="directory-sort"><ArrowDownUp size={14} /><select value={senderSort} onChange={event => setSenderSort(event.target.value as SenderSort)} aria-label="Sort senders"><option value="count">Most emails</option><option value="recent">Most recent</option><option value="name">Name A–Z</option><option value="size">Largest known total</option></select></label></div><div className="directory-senders">{visibleGroups.length ? visibleGroups.slice(0, senderLimit).map(group => <button key={group.sender} className={`directory-sender ${activeSender === group.sender ? 'selected' : ''}`} disabled={deleting || preparingSender} onClick={() => openSender(group.sender)}><span className="directory-avatar">{group.name.slice(0, 1).toUpperCase()}</span><span className="directory-sender-copy"><strong title={group.name}>{group.name}</strong><small title={group.sender}>{group.sender}</small></span><span className="directory-sender-meta"><strong>{group.count.toLocaleString()}</strong><small>{dateLabel(group.latest)}</small></span></button>) : <div className="directory-no-results">{hydrated ? 'No senders match this search yet.' : 'Loading saved senders…'}</div>}</div>{visibleGroups.length > senderLimit && <button className="directory-more" onClick={() => setSenderLimit(value => value + 100)}>Show next 100 senders</button>}</div>

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Check, CheckCheck, ChevronDown, Cloud, FileText, HardDrive, Inbox, LayoutDashboard, LockKeyhole, Mail, Menu, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, UsersRound, X } from "lucide-react";
 import type { CleanupItem } from "@/lib/mailbot";
 import { detailBatchSize, googleCoverage, loadGoogleMailBatch, scanGoogleMail, trashGoogleMail, type CleanupProgress, type PendingMessage, type ScanProgress, type UndoMessage } from "@/lib/google-mail";
+import { ScanNotice } from "./scan-notice";
 import { GoogleSetup, useGoogleConnection } from "./google-connect";
 import SenderCleanup from "./sender-cleanup";
 import SenderDirectory from "./sender-directory";
@@ -58,10 +59,7 @@ export default function Dashboard({ user: hostedUser, signInPath, signOutPath, o
         if (!controller.signal.aborted) { setScan(result); setSelected([]); }
         return;
       }
-      const res = await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", cache: "no-store" });
-      const data = await res.json() as Scan & { error?: string };
-      if (!res.ok) throw new Error(data.error || "Scan failed");
-      if (!controller.signal.aborted) { setScan(data); setSelected([]); }
+      throw new Error("Connect Google to use fast scanning.");
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Scan failed"); }
     finally { if (scanController.current === controller) { scanController.current = null; setLoading(false); setScanProgress(null); } }
   }
@@ -103,7 +101,7 @@ export default function Dashboard({ user: hostedUser, signInPath, signOutPath, o
     const moved = new Set(ids);
     setRestoredInOtherView(previous => previous.filter(message => !moved.has(message.id)));
     for (const item of scan?.items || []) if (moved.has(item.id)) removedOverview.current.set(item.id, item);
-    setScan(prev => prev ? { ...prev, items: prev.items.filter(item => !moved.has(item.id)) } : prev);
+    setScan(prev => prev ? { ...prev, items: prev.items.filter(item => !moved.has(item.id)), pending: prev.pending?.filter(message => !moved.has(message.id)) } : prev);
     setSelected(prev => prev.filter(id => !moved.has(id)));
   }
   function restoreToViews(messages: UndoMessage[]) {
@@ -162,7 +160,7 @@ export default function Dashboard({ user: hostedUser, signInPath, signOutPath, o
     </aside>
     <main className="main">
       <header className="topbar"><button className="mobile-menu" onClick={() => setMobileNav(!mobileNav)} aria-label="Toggle menu"><Menu size={21} /></button><div className="breadcrumb">Workspace <span>/</span> <strong>{view === "senders" ? "Senders" : view === "drive" ? "Google Drive" : "Overview"}</strong></div><div className="header-right"><div className="secure-label"><LockKeyhole size={14} /> Private workspace</div>{google.session ? <button className="google-account" disabled={senderBusy || driveBusy || cleaning || !!undo.restoring} onClick={google.disconnect} title="Disconnect Google account">{google.session.email} <X size={13} /></button> : hostedUser ? <><button className="signin-small google-signin" onClick={google.connect} disabled={google.connecting}>{google.connecting ? "Connecting…" : "Connect Google"}</button><a className="avatar" href={signOutPath} target="_top" title="Sign out">{user?.name.slice(0, 1).toUpperCase()}</a></> : <button className="signin-small google-signin" onClick={google.connect} disabled={google.connecting}>{google.connecting ? "Connecting…" : "Sign in with Google"}</button>}</div></header>
-      <div className="content">{view !== "drive" && google.connectionError && <div className="error-banner" role="alert">{google.connectionError}<button onClick={() => google.setSetupOpen(true)}>Connection settings</button></div>}{driveOpened && <div hidden={view !== "drive"}><DriveBrowser key={google.session?.email || "disconnected"} session={google.session} active={view === "drive"} connecting={google.connecting} connectionError={google.connectionError} clientId={google.clientId} externalBusy={loading || cleaning || senderBusy || !!undo.restoring} onConnect={google.connectDrive} onBusy={setDriveBusy} /></div>}{sendersOpened && <div hidden={view !== "senders"}><SenderDirectory key={google.session?.email || "disconnected"} undoPanel={undoPanel} active={view === "senders"} session={google.session} onConnect={google.connect} onConnectFast={google.connectFast} onUseStandard={google.useStandardScanning} connecting={google.connecting} onBusy={setSenderBusy} onScanning={setDirectoryScanning} onDeleting={setDirectoryDeleting} externalBusy={loading || cleaning || driveBusy || !!undo.restoring} externalMovedIds={movedInOtherView} externalRestoredMessages={restoredInOtherView} onUndoGroup={undo.recordGroup} onMoved={removeFromOverview} /></div>}{view === "overview" && <>
+      <div className="content"><ScanNotice session={google.session} connecting={google.connecting} onConnect={google.connect} />{view !== "drive" && google.connectionError && <div className="error-banner" role="alert">{google.connectionError}<button onClick={google.connect} disabled={google.connecting}>Reconnect Google</button><button onClick={() => google.setSetupOpen(true)}>Connection settings</button></div>}{driveOpened && <div hidden={view !== "drive"}><DriveBrowser key={google.session?.email || "disconnected"} session={google.session} active={view === "drive"} connecting={google.connecting} connectionError={google.connectionError} clientId={google.clientId} externalBusy={loading || cleaning || senderBusy || !!undo.restoring} onConnect={google.connectDrive} onBusy={setDriveBusy} /></div>}{sendersOpened && <div hidden={view !== "senders"}><SenderDirectory key={google.session?.email || "disconnected"} undoPanel={undoPanel} active={view === "senders"} session={google.session} onConnect={google.connect} connecting={google.connecting} onBusy={setSenderBusy} onScanning={setDirectoryScanning} onDeleting={setDirectoryDeleting} externalBusy={loading || cleaning || driveBusy || !!undo.restoring} externalMovedIds={movedInOtherView} externalRestoredMessages={restoredInOtherView} onUndoGroup={undo.recordGroup} onMoved={removeFromOverview} /></div>}{view === "overview" && <>
         <div className="eyebrow"><span className="eyebrow-dot" /> YOUR DIGITAL SPACE, REIMAGINED</div>
         <div className="heading-row"><div><h1>A little less digital noise<span className="period">.</span></h1><p className="intro">Find what you no longer need. Keep what matters.</p></div><button className="refresh-btn" onClick={() => void refresh()} disabled={!user || loading || senderBusy || driveBusy || !!undo.restoring}><RefreshCw size={16} className={loading ? "spin" : ""} />{loading ? "Scanning…" : "Scan again"}</button></div>
         {undoPanel}

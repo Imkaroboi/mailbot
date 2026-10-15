@@ -32,7 +32,7 @@ export async function scanFastSenderDirectory(
     body: JSON.stringify(sender ? { sender } : {}),
   });
   if (!response.ok || !response.body) {
-    let message = 'The fast scanner could not connect. Retry, or use standard scanning.';
+    let message = 'The fast scanner could not connect. It may need about a minute to wake up. Retry shortly.';
     try { const data = await response.json(); if (typeof data.error === 'string') message = data.error; } catch {}
     throw Object.assign(new Error(message), { status: response.status });
   }

@@ -70,7 +70,7 @@ export function createScannerServer({ allowedOrigins, verifyToken, createClient,
       finally { clearInterval(heartbeat); }
     } catch (error) {
       if (!response.destroyed) {
-        const message = timedOut ? 'The scan reached its time limit. Saved headers are kept; resume to continue.' : error instanceof RequestError ? error.message : error?.authenticationFailed ? 'Google did not allow the fast mail connection. Reconnect fast scanning, or use the standard scan.' : 'The fast scan stopped. Saved headers are kept; check your connection and resume.';
+        const message = timedOut ? 'The scan reached its time limit. Saved headers are kept; resume to continue.' : error instanceof RequestError ? error.message : error?.authenticationFailed ? 'Google did not allow the fast mail connection. Reconnect Google and approve fast scanning.' : 'The fast scan stopped. Saved headers are kept; check your connection and resume.';
         if (response.headersSent) response.write(`${JSON.stringify({ type: 'error', message })}\n`);
         else json(error instanceof RequestError ? error.status : 502, { error: message });
       }
